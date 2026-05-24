@@ -215,6 +215,23 @@ Supported providers:
 
 - `cloudflare-temp-mail`: compatible with Cloudflare Temp Email management APIs, reads `/admin/mails`, supports `adminAuth` / `customAuth`
 - `cloud-mail`: compatible with Cloud Mail public APIs, reads `/api/public/emailList`, supports `token` or `adminEmail` + `adminPassword`
+- `qq-mail`: reads a QQ mailbox through IMAP. This is useful for DuckDuckGo Email Protection addresses such as `user@duck.com` when Duck forwards verification mail to QQ Mail.
+
+### Duck.com forwarded to QQ Mail
+
+Duck.com addresses are forwarding aliases, not standalone IMAP inboxes. To log in with a Duck address and receive OpenAI verification codes through QQ Mail:
+
+1. Enable IMAP in QQ Mail.
+2. Generate a QQ Mail authorization code. Use this authorization code, not your QQ password.
+3. In the import modal, choose `QQ 邮箱`.
+4. Fill in your QQ mailbox address and IMAP authorization code.
+5. Import the Duck login address in simple format:
+
+   ```text
+   your-duck-address@duck.com----x
+   ```
+
+The app submits the Duck address to OpenAI, waits for DuckDuckGo to forward the verification email to QQ Mail, and reads the code from `imap.qq.com:993` over SSL.
 
 The provider compatibility layer references the Cloudflare Temp Email / Cloud Mail API patterns from [FoundZiGu/GuJumpgate](https://github.com/FoundZiGu/GuJumpgate). This project only adds verification-mail compatibility, not GuJumpgate's repository automation.
 

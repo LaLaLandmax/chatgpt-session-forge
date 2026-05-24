@@ -38,6 +38,7 @@ async function fetchEmails(accounts, options = {}) {
   const allEmails = [];
   const fatalErrors = [];
   let successfulAccounts = 0;
+  renderFetchIssues([]);
 
   // === 并发池：同时处理多个账号 ===
   async function fetchOneAccount(account, index) {
@@ -160,9 +161,11 @@ async function fetchEmails(accounts, options = {}) {
 
   if (fatalErrors.length > 0) {
     const failedAccounts = accounts.length - successfulAccounts;
+    renderFetchIssues(fatalErrors);
     setStatus(successfulAccounts > 0 ? 'ready' : 'error', `完成：${successfulAccounts} 成功 / ${failedAccounts} 失败`);
     showToast(`取件完成，但有 ${failedAccounts} 个邮箱协议失败`, successfulAccounts > 0 ? 'warning' : 'error', 5000);
   } else {
+    renderFetchIssues([]);
     setStatus('ready', '就绪');
   }
 
@@ -263,6 +266,25 @@ function showSkeletonCards(count) {
   let html = '';
   for (let i = 0; i < count; i++) html += '<div class="skeleton skeleton-card"></div>';
   listEl.innerHTML = html;
+}
+
+function renderFetchIssues(errors = []) {
+  const issuesEl = document.getElementById('fetchIssues');
+  if (!issuesEl) return;
+  if (!errors.length) {
+    issuesEl.style.display = 'none';
+    issuesEl.innerHTML = '';
+    return;
+  }
+
+  issuesEl.style.display = 'block';
+  issuesEl.innerHTML = errors.map(item => {
+    const protocol = item.protocol ? ` [${item.protocol}]` : '';
+    return `<div class="fetch-issue-item">
+      <strong>${escapeHtml(item.email || '邮箱')}${escapeHtml(protocol)}</strong>
+      <span>${escapeHtml(item.error || '未知错误')}</span>
+    </div>`;
+  }).join('');
 }
 
 function showProgress(show) {

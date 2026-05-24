@@ -401,6 +401,7 @@
               <option value="outlook">Outlook</option>
               <option value="cloudflare-temp-mail">Cloudflare Temp Email</option>
               <option value="cloud-mail">Cloud Mail</option>
+              <option value="qq-mail">QQ 邮箱</option>
             </select>
           </label>
           <span class="import-provider-note" id="importProviderNote">导入时保持 Outlook 四段格式</span>
@@ -491,6 +492,28 @@
             <label class="config-field">
               <span>域名</span>
               <input type="text" id="cloudMailDomain" class="input config-input" placeholder="mail.example.com" autocomplete="off" />
+            </label>
+          </div>
+        </section>
+
+        <section class="mail-provider-panel" id="qqMailProviderPanel" hidden>
+          <div class="provider-panel-title">
+            <div>
+              <strong>QQ MAIL</strong>
+              <span>读取 Duck 地址转发到 QQ 邮箱的验证码邮件</span>
+            </div>
+          </div>
+          <div class="config-grid">
+            <label class="config-field">
+              <span>QQ 邮箱地址</span>
+              <input type="email" id="qqMailboxEmail" class="input config-input" placeholder="your@qq.com" autocomplete="off" />
+            </label>
+            <label class="config-field secret-field">
+              <span>IMAP 授权码</span>
+              <input type="password" id="qqAuthCode" class="input config-input secret-input" placeholder="QQ 邮箱授权码，不是 QQ 密码" autocomplete="off" />
+              <button type="button" class="secret-toggle" data-target="qqAuthCode" title="显示/隐藏">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
             </label>
           </div>
         </section>

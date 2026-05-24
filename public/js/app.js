@@ -60,6 +60,7 @@ const LOGGABLE_LOGIN_STATUSES = new Set([
   'identifier',
   'password',
   'waiting_code',
+  'code_found',
   'verify_code',
   'session',
 ]);
@@ -171,7 +172,7 @@ function shouldLogLoginStatus(data) {
 }
 
 function formatLoginStatus(status, detail) {
-  const cleanDetail = String(detail || '').replace(/\b\d{6}\b/g, '******');
+  const cleanDetail = String(detail || '');
   if (cleanDetail) return cleanDetail;
   const labels = {
     csrf: '获取 CSRF Token',
@@ -182,6 +183,7 @@ function formatLoginStatus(status, detail) {
     password: '提交密码',
     waiting_code: '等待验证码邮件',
     checking_code: '检查验证码邮件',
+    code_found: '已获取验证码',
     send_code: '重新触发验证码',
     verify_code: '提交验证码',
     callback: '跟随回调链路',

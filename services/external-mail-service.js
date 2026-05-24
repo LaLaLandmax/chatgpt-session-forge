@@ -3,7 +3,13 @@
  * 兼容 Cloudflare Temp Email / Cloud Mail 的收件 API。
  */
 
+const { ImapFlow } = require('imapflow');
+
 const DEFAULT_LIMIT = 20;
+const QQ_IMAP_HOST = 'imap.qq.com';
+const QQ_IMAP_PORT = 993;
+const IMAP_BODY_PREVIEW_BYTES = 128 * 1024;
+const IMAP_BODY_TEXT_MAX_CHARS = 120000;
 
 function firstNonEmpty(values) {
   for (const value of values) {
@@ -64,6 +70,9 @@ function normalizeProvider(value = '') {
   }
   if (['cloud-mail', 'cloudmail'].includes(provider)) {
     return 'cloud-mail';
+  }
+  if (['qq-mail', 'qqmail', 'qq'].includes(provider)) {
+    return 'qq-mail';
   }
   return 'outlook';
 }
@@ -299,6 +308,24 @@ function normalizeMessage(row = {}, protocol = 'external') {
   };
 }
 
+function normalizeImapMessage(message, protocol = 'imap') {
+  const from = message.from || '';
+  const bodyText = message.bodyText || stripHtml(message.bodyHtml || '');
+  return {
+    id: message.messageId || '',
+    messageId: message.messageId || '',
+    subject: message.subject || '(无主题)',
+    from,
+    fromName: message.fromName || from,
+    date: normalizeDate(message.date),
+    bodyPreview: (message.bodyPreview || bodyText).substring(0, 240),
+    bodyText: bodyText.substring(0, IMAP_BODY_TEXT_MAX_CHARS),
+    bodyHtml: message.bodyHtml || '',
+    protocol,
+    recipient: message.recipient || '',
+  };
+}
+
 function messageHasBody(row = {}) {
   return Boolean(firstNonEmpty([
     row.html,
@@ -463,10 +490,247 @@ async function fetchCloudMail(account, options = {}) {
   return { success: true, emails, count: emails.length, protocol: 'cloud-mail' };
 }
 
+async function fetchQqMail(account, options = {}) {
+  const config = getAccountProviderConfig(account);
+  const mailboxEmail = firstNonEmpty([
+    config.mailboxEmail,
+    config.mailbox_email,
+    config.email,
+    config.username,
+  ]).toLowerCase();
+  const authCode = firstNonEmpty([
+    config.authCode,
+    config.auth_code,
+    config.authorizationCode,
+    config.password,
+  ]);
+
+  if (!mailboxEmail) throw new Error('QQ 邮箱缺少 mailboxEmail');
+  if (!authCode) throw new Error('QQ 邮箱缺少 IMAP 授权码');
+
+  const client = new ImapFlow({
+    host: QQ_IMAP_HOST,
+    port: QQ_IMAP_PORT,
+    secure: true,
+    auth: {
+      user: mailboxEmail,
+      pass: authCode,
+    },
+    clientInfo: {
+      name: 'chatgpt-session-forge',
+      version: '1.0.0',
+      vendor: 'local',
+    },
+    disableAutoIdle: true,
+    disableAutoEnable: true,
+    disableCompression: true,
+    logger: false,
+    tls: {
+      servername: QQ_IMAP_HOST,
+      minVersion: 'TLSv1.2',
+    },
+    connectionTimeout: 30000,
+    greetingTimeout: 15000,
+    socketTimeout: 30000,
+  });
+
+  try {
+    await client.connect();
+    const mailbox = await client.getMailboxLock('INBOX');
+    try {
+      const limit = Math.max(1, Math.min(50, Number(options.limit) || DEFAULT_LIMIT));
+      const uids = await resolveRecentImapUids(client, limit, Boolean(options.keyword || options.sender));
+      if (uids.length === 0) {
+        return { success: true, emails: [], count: 0, protocol: 'qq-mail' };
+      }
+
+      const messages = await fetchImapMessageSummaries(client, uids, mailboxEmail);
+      await hydrateImapMessageBodies(client, messages);
+      const emails = filterMessages(
+        messages.map(message => normalizeImapMessage(message, 'qq-mail')),
+        { ...account, email: '' },
+        options,
+        ''
+      );
+      return { success: true, emails, count: emails.length, protocol: 'qq-mail' };
+    } finally {
+      mailbox.release();
+    }
+  } catch (err) {
+    throw new Error(normalizeQqImapError(err));
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
+async function resolveRecentImapUids(client, limit, hasFilters) {
+  const wanted = Math.max(limit, hasFilters ? Math.min(80, limit * 4) : limit);
+  const exists = Number(client.mailbox?.exists || 0);
+  if (exists <= 0) return [];
+
+  const sequenceStart = Math.max(1, exists - Math.max(wanted, 20) + 1);
+  const uids = [];
+  for await (const msg of client.fetch(`${sequenceStart}:*`, { uid: true, internalDate: true })) {
+    if (msg.uid) uids.push(msg.uid);
+  }
+  return uids.sort((a, b) => b - a).slice(0, Math.max(wanted, limit));
+}
+
+async function fetchImapMessageSummaries(client, uids, recipient = '') {
+  const messages = [];
+  for await (const msg of client.fetch(uids, {
+    uid: true,
+    envelope: true,
+    bodyStructure: true,
+    internalDate: true,
+  }, { uid: true })) {
+    const from = firstAddress(msg.envelope?.from);
+    messages.push({
+      uid: msg.uid,
+      messageId: msg.envelope?.messageId || `qq-imap-${msg.uid}`,
+      subject: msg.envelope?.subject || '(无主题)',
+      from: from?.address || '',
+      fromName: from?.name || '',
+      date: (msg.envelope?.date || msg.internalDate || new Date()).toISOString(),
+      bodyText: '',
+      bodyPreview: '',
+      bodyHtml: '',
+      recipient,
+      bodyPart: findPreferredImapBodyPart(msg.bodyStructure),
+    });
+  }
+  return messages;
+}
+
+async function hydrateImapMessageBodies(client, messages) {
+  for (const message of messages) {
+    try {
+      if (message.bodyPart?.part) {
+        const fetched = await client.fetchOne(message.uid, {
+          uid: true,
+          bodyParts: [{ key: message.bodyPart.part, start: 0, maxLength: IMAP_BODY_PREVIEW_BYTES }],
+        }, { uid: true });
+        const part = fetched?.bodyParts?.get(message.bodyPart.part);
+        if (part) {
+          applyImapBodyContent(message, part, message.bodyPart);
+          continue;
+        }
+      }
+
+      const fallback = await client.fetchOne(message.uid, {
+        uid: true,
+        source: { start: 0, maxLength: IMAP_BODY_PREVIEW_BYTES },
+      }, { uid: true });
+      if (fallback?.source) applyImapBodyContent(message, fallback.source, { type: 'text/plain' });
+    } catch {
+      // 信封信息可用于定位邮件，正文读取失败时跳过正文以免整个账号失败。
+    }
+  }
+}
+
+function firstAddress(addresses = []) {
+  return Array.isArray(addresses) && addresses.length > 0 ? addresses[0] : null;
+}
+
+function findPreferredImapBodyPart(structure) {
+  const parts = [];
+  walkImapBodyStructure(structure, parts);
+  return (
+    parts.find(part => part.type === 'text/plain' && part.disposition !== 'attachment') ||
+    parts.find(part => part.type === 'text/html' && part.disposition !== 'attachment') ||
+    parts.find(part => part.type.startsWith('text/') && part.disposition !== 'attachment') ||
+    null
+  );
+}
+
+function walkImapBodyStructure(node, parts) {
+  if (!node) return;
+  if (Array.isArray(node.childNodes)) {
+    node.childNodes.forEach(child => walkImapBodyStructure(child, parts));
+    return;
+  }
+
+  const type = String(node.type || '').toLowerCase();
+  if (node.part && type.startsWith('text/')) {
+    parts.push({
+      part: node.part,
+      type,
+      encoding: String(node.encoding || '').toLowerCase(),
+      disposition: String(node.disposition || '').toLowerCase(),
+    });
+  }
+}
+
+function applyImapBodyContent(message, buffer, part = {}) {
+  let decoded = decodeImapBody(buffer, part.encoding);
+  if (!String(part.type || '').toLowerCase().includes('html')) {
+    const extractedHtml = extractHtmlFromMimeSource(decoded);
+    if (extractedHtml) {
+      decoded = extractedHtml;
+      part = { ...part, type: 'text/html' };
+    }
+  }
+  const text = stripHtml(decoded);
+  message.bodyText = text.substring(0, IMAP_BODY_TEXT_MAX_CHARS);
+  message.bodyPreview = text.substring(0, 240);
+  if (part.type === 'text/html') message.bodyHtml = decoded;
+}
+
+function extractHtmlFromMimeSource(value = '') {
+  const raw = String(value || '');
+  const htmlStart = raw.search(/<html[\s>]/i);
+  if (htmlStart >= 0) return raw.slice(htmlStart);
+
+  const headerEnd = raw.search(/\r?\n\r?\n/);
+  if (headerEnd >= 0) {
+    const body = raw.slice(headerEnd).trim();
+    if (/<body[\s>]|<table[\s>]|<p[\s>]/i.test(body)) return body;
+  }
+
+  return '';
+}
+
+function decodeImapBody(buffer, encoding = '') {
+  const raw = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  const normalizedEncoding = String(encoding || '').toLowerCase();
+
+  if (normalizedEncoding === 'base64') {
+    const compact = raw.toString('utf8').replace(/\s+/g, '');
+    return compact ? Buffer.from(compact, 'base64').toString('utf8') : '';
+  }
+
+  if (normalizedEncoding === 'quoted-printable') {
+    return decodeQuotedPrintable(raw.toString('utf8'));
+  }
+
+  return raw.toString('utf8');
+}
+
+function decodeQuotedPrintable(value = '') {
+  return String(value || '')
+    .replace(/=\r?\n/g, '')
+    .replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+function normalizeQqImapError(err) {
+  const message = err?.message || String(err || '未知错误');
+  if (/AUTHENTICATE|Authentication|Invalid credentials|NO AUTHENTICATE|LOGIN failed|AUTH failed/i.test(message)) {
+    return `QQ 邮箱 IMAP 认证失败：请确认已开启 IMAP 服务，并使用 QQ 邮箱授权码而不是 QQ 密码。${message}`;
+  }
+  if (/ETIMEDOUT|ESOCKET|ECONN|Greeting never received|Socket timeout|Timed out/i.test(message)) {
+    return `QQ 邮箱 IMAP 连接超时：${message}`;
+  }
+  if (/TLS|SSL|secure|socket disconnected|connection was established|ECONNRESET/i.test(message)) {
+    return `QQ 邮箱 IMAP TLS 连接失败：请确认当前网络或代理允许直连 imap.qq.com:993；如使用 Clash/TUN/代理，请尝试切换节点、开启直连规则或临时关闭代理后重试。${message}`;
+  }
+  return message;
+}
+
 async function fetchEmails(account, options = {}) {
   const provider = getAccountMailProvider(account);
   if (provider === 'cloudflare-temp-mail') return fetchCloudflareTempMail(account, options);
   if (provider === 'cloud-mail') return fetchCloudMail(account, options);
+  if (provider === 'qq-mail') return fetchQqMail(account, options);
   throw new Error(`不支持的外部邮箱 Provider: ${provider}`);
 }
 

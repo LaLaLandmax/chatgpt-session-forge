@@ -37,6 +37,7 @@ function normalizeAccountProvider(value = '') {
   const provider = String(value || '').trim().toLowerCase().replace(/_/g, '-');
   if (['cloudflare-temp-mail', 'cloudflare-temp-email', 'cloudflare'].includes(provider)) return 'cloudflare-temp-mail';
   if (['cloud-mail', 'cloudmail'].includes(provider)) return 'cloud-mail';
+  if (['qq-mail', 'qqmail', 'qq'].includes(provider)) return 'qq-mail';
   return 'outlook';
 }
 
@@ -49,6 +50,7 @@ function accountProviderLabel(provider) {
     outlook: 'Outlook',
     'cloudflare-temp-mail': 'CF Temp',
     'cloud-mail': 'Cloud Mail',
+    'qq-mail': 'QQ Mail',
   };
   return labels[provider] || provider;
 }
@@ -98,6 +100,10 @@ function collectImportProviderSettings() {
       adminPassword: document.getElementById('cloudMailAdminPassword')?.value.trim() || '',
       domain: document.getElementById('cloudMailDomain')?.value.trim() || '',
     },
+    qqMail: {
+      mailboxEmail: document.getElementById('qqMailboxEmail')?.value.trim() || '',
+      authCode: document.getElementById('qqAuthCode')?.value.trim() || '',
+    },
   };
 }
 
@@ -127,6 +133,10 @@ function applyImportProviderSettings() {
   if (cloudMail.adminEmail) document.getElementById('cloudMailAdminEmail').value = cloudMail.adminEmail;
   if (cloudMail.adminPassword) document.getElementById('cloudMailAdminPassword').value = cloudMail.adminPassword;
   if (cloudMail.domain) document.getElementById('cloudMailDomain').value = cloudMail.domain;
+
+  const qqMail = settings.qqMail || {};
+  if (qqMail.mailboxEmail) document.getElementById('qqMailboxEmail').value = qqMail.mailboxEmail;
+  if (qqMail.authCode) document.getElementById('qqAuthCode').value = qqMail.authCode;
 }
 
 function buildImportProviderConfig(provider = getImportProvider()) {
@@ -166,6 +176,16 @@ function buildImportProviderConfig(provider = getImportProvider()) {
     });
   }
 
+  if (provider === 'qq-mail') {
+    const qqMail = settings.qqMail;
+    if (!qqMail.mailboxEmail) errors.push('QQ 邮箱缺少邮箱地址');
+    if (!qqMail.authCode) errors.push('QQ 邮箱缺少 IMAP 授权码');
+    config = compactObject({
+      mailboxEmail: qqMail.mailboxEmail,
+      authCode: qqMail.authCode,
+    });
+  }
+
   return {
     ok: errors.length === 0,
     config: JSON.stringify(config),
@@ -177,6 +197,7 @@ function refreshImportProviderUi() {
   const provider = getImportProvider();
   const cfPanel = document.getElementById('cloudflareProviderPanel');
   const cloudMailPanel = document.getElementById('cloudMailProviderPanel');
+  const qqMailPanel = document.getElementById('qqMailProviderPanel');
   const note = document.getElementById('importProviderNote');
   const formatTip = document.getElementById('importFormatTip');
   const providerHelp = document.getElementById('importProviderHelp');
@@ -184,12 +205,14 @@ function refreshImportProviderUi() {
 
   if (cfPanel) cfPanel.hidden = provider !== 'cloudflare-temp-mail';
   if (cloudMailPanel) cloudMailPanel.hidden = provider !== 'cloud-mail';
+  if (qqMailPanel) qqMailPanel.hidden = provider !== 'qq-mail';
 
   if (note) {
     const notes = {
       outlook: '导入时保持 Outlook 四段格式',
       'cloudflare-temp-mail': '会自动追加 Cloudflare Temp Email 配置',
       'cloud-mail': '会自动追加 Cloud Mail 配置',
+      'qq-mail': '会自动追加 QQ 邮箱 IMAP 配置',
     };
     note.textContent = notes[provider] || notes.outlook;
   }
@@ -203,13 +226,17 @@ function refreshImportProviderUi() {
   if (providerHelp) {
     providerHelp.textContent = provider === 'outlook'
       ? 'Outlook 取验证码会使用该行的 clientid 和刷新令牌；如果 OpenAI 要求密码登录，会使用第二段密码。'
-      : 'Cloudflare Temp Email / Cloud Mail 的 API 配置填在上面；第二段不是自建邮箱密码，如果 OpenAI 只要验证码，可以填 x。';
+      : provider === 'qq-mail'
+        ? '文本框填写 Duck 登录邮箱；验证码会由 Duck 转发到 QQ 邮箱，再通过 QQ IMAP 授权码读取。授权码不是 QQ 密码。'
+        : 'Cloudflare Temp Email / Cloud Mail 的 API 配置填在上面；第二段不是自建邮箱密码，如果 OpenAI 只要验证码，可以填 x。';
   }
 
   if (textarea) {
     textarea.placeholder = provider === 'outlook'
       ? 'login-email@outlook.com----openai-password-or-x----client-id-here----refresh-token-here\nlogin-email2@outlook.com--openai-password-or-x--clientid--token'
-      : 'login-email@example.com----x\nanother-login-email@example.com----openai-password-if-needed';
+      : provider === 'qq-mail'
+        ? 'your-duck-address@duck.com----x\nanother-duck-address@duck.com----openai-password-if-needed'
+        : 'login-email@example.com----x\nanother-login-email@example.com----openai-password-if-needed';
   }
 }
 
@@ -581,7 +608,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateImportPreview();
   });
 
-  document.querySelectorAll('#cloudflareProviderPanel input, #cloudflareProviderPanel select, #cloudMailProviderPanel input, #cloudMailProviderPanel select').forEach(el => {
+  document.querySelectorAll('#cloudflareProviderPanel input, #cloudflareProviderPanel select, #cloudMailProviderPanel input, #cloudMailProviderPanel select, #qqMailProviderPanel input, #qqMailProviderPanel select').forEach(el => {
     el.addEventListener('input', () => {
       saveImportProviderSettings();
       updateImportPreview();

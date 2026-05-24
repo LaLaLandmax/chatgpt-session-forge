@@ -353,6 +353,10 @@ body {
   font-weight: 800;
   line-height: 1.3;
 }
+.account-provider.qq-mail {
+  background: rgba(14, 165, 233, 0.08);
+  color: #0284c7;
+}
 
 .account-copy, .account-delete { opacity: 0; transition: var(--transition-fast); flex-shrink: 0; }
 .account-item:hover .account-copy, .account-item:hover .account-delete { opacity: 0.5; }
@@ -1100,6 +1104,10 @@ body {
 /* --- 取件错误 --- */
 .fetch-issues { margin: 2px 0 10px; padding: 12px 14px; border-radius: var(--radius-md); background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.18); }
 .fetch-issues-title { display: flex; align-items: center; justify-content: space-between; font-size: 0.82rem; font-weight: 600; color: #92400e; margin-bottom: 8px; }
+.fetch-issue-item { display: grid; gap: 3px; font-size: 0.8rem; color: #92400e; }
+.fetch-issue-item + .fetch-issue-item { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(245, 158, 11, 0.18); }
+.fetch-issue-item strong { color: #78350f; }
+.fetch-issue-item span { word-break: break-word; }
 
 /* --- 响应式 --- */
 @media (max-width: 1200px) {

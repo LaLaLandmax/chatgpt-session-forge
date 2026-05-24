@@ -216,8 +216,25 @@ Cockpit 导出采用 `cockpit-tools` 当前导入逻辑支持的扁平 Codex tok
 
 - `cloudflare-temp-mail`：兼容 Cloudflare Temp Email 管理接口，读取 `/admin/mails`，可配置 `adminAuth` / `customAuth`
 - `cloud-mail`：兼容 Cloud Mail 公共接口，读取 `/api/public/emailList`，可配置 `token`，或用 `adminEmail` + `adminPassword` 自动获取 token
+- `qq-mail`：通过 QQ 邮箱 IMAP 读取收件箱，适合 `user@duck.com` 这类 DuckDuckGo Email Protection 地址转发到 QQ 邮箱的场景
 
 该兼容层参考了 [FoundZiGu/GuJumpgate](https://github.com/FoundZiGu/GuJumpgate) 中 Cloudflare Temp Email / Cloud Mail 的接口思路；本项目没有合并它的仓管功能，只在取验证码邮件这层增加兼容。
+
+### duck.com 转发到 QQ 邮箱
+
+Duck 地址是转发别名，不是独立 IMAP 收件箱。若 OpenAI 验证码发到 `@duck.com` 后会转发到 QQ 邮箱，可按以下方式导入：
+
+1. 在 QQ 邮箱中开启 IMAP 服务。
+2. 生成 QQ 邮箱授权码。这里使用授权码，不是 QQ 登录密码。
+3. 在导入弹窗选择 `QQ 邮箱`。
+4. 填写 QQ 邮箱地址和 IMAP 授权码。
+5. 文本框中导入 Duck 登录邮箱：
+
+   ```text
+   your-duck-address@duck.com----x
+   ```
+
+程序会把 Duck 地址提交给 OpenAI 登录，然后通过 `imap.qq.com:993` SSL 读取 QQ 收件箱中转发过来的验证码邮件。
 
 ## 致谢
 

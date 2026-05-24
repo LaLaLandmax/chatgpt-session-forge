@@ -130,7 +130,7 @@ class ChatGPTProtocolLogin {
         onStatus('sentinel', '生成 Sentinel Token...');
         loginState.sentinelToken = await this._getSentinelToken(loginState, 'authorize_continue');
         onStatus('identifier', '提交邮箱...');
-        const otpIssuedAfter = Date.now() - 10000;
+        const otpIssuedAfter = Date.now();
         const firstStep = await this._authorizeContinue(jar, loginState, email);
         callbackUrl = await this._completeModernLogin(
           jar,
@@ -149,6 +149,7 @@ class ChatGPTProtocolLogin {
 
         // ====== 旧版 Step 4: 提交邮箱 ======
         onStatus('identifier', '提交邮箱...');
+        const otpIssuedAfter = Date.now();
         const identResult = await this._submitIdentifier(jar, loginState, email);
 
         // ====== 旧版 Step 5: 密码 or 验证码 ======
@@ -157,7 +158,7 @@ class ChatGPTProtocolLogin {
           callbackUrl = await this._submitPassword(jar, loginState, password);
         } else {
           onStatus('waiting_code', '等待验证码邮件...');
-          const code = await this._waitForCode(account, fetchCodeFn, onStatus);
+          const code = await this._waitForCode(account, fetchCodeFn, onStatus, otpIssuedAfter);
           if (!code) throw new Error('未能获取验证码，请检查邮箱配置');
 
           onStatus('verify_code', `提交验证码: ${code}`);
@@ -397,21 +398,38 @@ class ChatGPTProtocolLogin {
       return continueUrl;
     }
 
+    const rejectedCodes = new Set();
     onStatus('waiting_code', '等待验证码邮件...');
-    let code = await this._waitForCode(account, fetchCodeFn, onStatus, otpIssuedAfter);
+    let code = await this._waitForCode(account, fetchCodeFn, onStatus, otpIssuedAfter, rejectedCodes);
 
     if (!code) {
       onStatus('send_code', '尝试重新触发验证码...');
-      const resentAt = Date.now() - 10000;
+      const resentAt = Date.now();
       loginState.sentinelToken = await this._getSentinelToken(loginState, 'email_verification');
       await this._kickoffModernOtp(jar, loginState, mode);
-      code = await this._waitForCode(account, fetchCodeFn, onStatus, resentAt);
+      code = await this._waitForCode(account, fetchCodeFn, onStatus, resentAt, rejectedCodes);
     }
 
     if (!code) throw new Error('未能获取验证码，请检查邮箱配置');
 
-    onStatus('verify_code', `提交验证码: ${code}`);
-    currentStep = await this._submitModernCode(jar, loginState, code);
+    let lastOtpError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      onStatus('verify_code', `提交验证码: ${code}`);
+      try {
+        currentStep = await this._submitModernCode(jar, loginState, code);
+        lastOtpError = null;
+        break;
+      } catch (err) {
+        if (!this._isWrongOtpError(err) || attempt >= 3) throw err;
+        lastOtpError = err;
+        rejectedCodes.add(code);
+        onStatus('waiting_code', '验证码已过期或不匹配，继续等待新验证码...');
+        code = await this._waitForCode(account, fetchCodeFn, onStatus, Date.now(), rejectedCodes)
+          || await this._waitForCode(account, fetchCodeFn, onStatus, otpIssuedAfter, rejectedCodes);
+        if (!code) throw lastOtpError;
+      }
+    }
+    if (lastOtpError) throw lastOtpError;
     continueUrl = this._normalizeAuthUrl(this._extractContinueUrl(currentStep));
 
     if (!continueUrl) {
@@ -467,6 +485,13 @@ class ChatGPTProtocolLogin {
       throw new Error(`验证码验证失败: HTTP ${resp.status} - ${this._compactError(data)}`);
     }
     return data;
+  }
+
+  _isWrongOtpError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return message.includes('wrong_email_otp_code') ||
+      message.includes('wrong code') ||
+      message.includes('invalid_request_error');
   }
 
   async _kickoffModernOtp(jar, loginState, mode = '') {
@@ -776,7 +801,7 @@ class ChatGPTProtocolLogin {
   }
 
   /** 轮询获取验证码 */
-  async _waitForCode(account, fetchCodeFn, onStatus, issuedAfter = 0) {
+  async _waitForCode(account, fetchCodeFn, onStatus, issuedAfter = 0, ignoredCodes = new Set()) {
     const maxRetries = config.chatgpt.codeCheckMaxRetries;
     const interval = config.chatgpt.codeCheckInterval;
 
@@ -785,8 +810,11 @@ class ChatGPTProtocolLogin {
       try {
         const emails = await fetchCodeFn(account);
         if (emails && emails.length > 0) {
-          const code = this._extractCodeFromEmails(emails, issuedAfter);
-          if (code) return code;
+          const code = this._extractCodeFromEmails(emails, issuedAfter, ignoredCodes);
+          if (code) {
+            onStatus('code_found', `已获取验证码: ${code}`);
+            return code;
+          }
         }
       } catch (err) {
         console.error(`[协议登录] 获取验证码出错 (${i + 1}/${maxRetries}):`, err.message);
@@ -797,8 +825,8 @@ class ChatGPTProtocolLogin {
   }
 
   /** 从邮件中提取 6 位验证码 */
-  _extractCodeFromEmails(emails, issuedAfter = 0) {
-    const cutoff = issuedAfter ? issuedAfter - 60000 : 0;
+  _extractCodeFromEmails(emails, issuedAfter = 0, ignoredCodes = new Set()) {
+    const cutoff = issuedAfter || 0;
     const candidates = cutoff
       ? emails.filter(email => {
           const ts = new Date(email.date || email.receivedDateTime || 0).getTime();
@@ -816,19 +844,89 @@ class ChatGPTProtocolLogin {
         subjectStr.includes('verification') || subjectStr.includes('verify') ||
         subjectStr.includes('code') || subjectStr.includes('login') || subjectStr.includes('otp')
       ) {
-        const content = `${email.subject || ''} ${email.bodyText || ''} ${email.bodyPreview || ''}`;
-        const match = content.match(/\b(\d{6})\b/);
-        if (match) return match[1];
+        const code = this._extractOtpFromEmailContent(email, ignoredCodes);
+        if (code) return code;
       }
     }
 
     // 回退
     for (const email of sorted) {
-      const content = `${email.subject || ''} ${email.bodyText || ''} ${email.bodyPreview || ''}`;
-      const match = content.match(/\b(\d{6})\b/);
-      if (match) return match[1];
+      const code = this._extractOtpFromEmailContent(email, ignoredCodes);
+      if (code) return code;
     }
     return null;
+  }
+
+  _extractOtpFromEmailContent(email, ignoredCodes = new Set()) {
+    const body = this._normalizeOtpEmailBody([
+      email.bodyText,
+      email.bodyPreview,
+      email.bodyHtml,
+      email.text,
+      email.html,
+    ].filter(Boolean).join('\n'));
+    const subject = this._normalizeOtpEmailBody(email.subject || '');
+    const content = `${subject}\n${body}`;
+
+    const preferredPatterns = [
+      /enter\s+this\s+temporary\s+verification\s+code\s+to\s+continue(?:\D{0,80})(\d{6})/i,
+      /(?:temporary\s+chatgpt\s+login\s+code|chatgpt\s+login\s+code|login\s+code|verification\s+code|temporary\s+code|one[-\s]?time\s+code|code)(?:\D{0,80})(\d{6})/i,
+      /(\d{6})(?:\D{0,80})(?:temporary\s+chatgpt\s+login\s+code|chatgpt\s+login\s+code|login\s+code|verification\s+code|temporary\s+code|one[-\s]?time\s+code)/i,
+    ];
+
+    for (const pattern of preferredPatterns) {
+      const match = content.match(pattern);
+      if (match && !ignoredCodes.has(match[1])) return match[1];
+    }
+
+    const bodyOnlyMatch = this._extractLikelyBodyOtp(body, ignoredCodes);
+    if (bodyOnlyMatch) return bodyOnlyMatch;
+
+    return null;
+  }
+
+  _extractLikelyBodyOtp(body, ignoredCodes = new Set()) {
+    const markerPattern = /(?:enter\s+this\s+temporary\s+verification\s+code\s+to\s+continue|didn't\s+request\s+a\s+verification\s+code|best,\s*the\s+chatgpt\s+team|chatgpt\s+help\s+center)/i;
+    const marker = body.search(markerPattern);
+    const searchArea = marker >= 0 ? body.slice(Math.max(0, marker - 80)) : body;
+    const matches = [...searchArea.matchAll(/\b(\d{6})\b/g)].map(match => match[1]);
+    for (const code of matches) {
+      if (!ignoredCodes.has(code)) return code;
+    }
+    return null;
+  }
+
+  _normalizeOtpEmailBody(value = '') {
+    let text = String(value || '');
+    text = text.replace(/=\r?\n/g, '');
+    text = text.replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    text = text.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+    text = text.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+    text = text.replace(/<[^>]+>/g, ' ');
+    text = text
+      .replace(/&nbsp;/gi, ' ')
+      .replace(/&amp;/gi, '&')
+      .replace(/&lt;/gi, '<')
+      .replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"')
+      .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+      .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+
+    const headerEndPatterns = [
+      /(?:^|\n)\s*Content-Type:[^\n]*(?:\n[\s\S]*)?/i,
+      /(?:^|\n)\s*X-Mailgun-Tag:\s*email-otp[^\n]*(?:\n[\s\S]*)?/i,
+      /(?:^|\n)\s*Subject:\s*Your temporary ChatGPT login code[^\n]*(?:\n[\s\S]*)?/i,
+    ];
+    for (const pattern of headerEndPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        text = match[0];
+        break;
+      }
+    }
+
+    text = text.replace(/^[\s\S]*?(?=(?:enter\s+this\s+temporary\s+verification\s+code\s+to\s+continue|your\s+temporary\s+chatgpt\s+login\s+code|chatgpt\s+login\s+code|verification\s+code|login\s+code|\b\d{6}\b))/i, '');
+    return text.replace(/\s+/g, ' ').trim();
   }
 
   // 兼容旧接口
