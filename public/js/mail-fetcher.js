@@ -241,14 +241,137 @@ function showEmailDetail(index) {
     <span><strong>账号</strong> ${escapeHtml(email._account || '')}</span>
   `;
 
-  const bodyEl = document.getElementById('emailDetailBody');
-  if (email.bodyHtml) {
-    bodyEl.innerHTML = `<iframe srcdoc="${escapeAttr(email.bodyHtml)}" style="width:100%;min-height:300px;border:none;border-radius:8px;background:white;" sandbox="allow-same-origin"></iframe>`;
-  } else {
-    bodyEl.innerHTML = `<pre style="white-space:pre-wrap;font-family:inherit;">${escapeHtml(email.bodyText || email.bodyPreview || '(无内容)')}</pre>`;
-  }
+  const initialMode = email.protocol === 'qq-mail' ? 'clean' : 'body';
+  renderEmailDetailBody(email, initialMode);
 
   document.getElementById('emailDetailModal').classList.add('active');
+}
+
+function renderEmailDetailBody(email, mode = 'body') {
+  const bodyEl = document.getElementById('emailDetailBody');
+  if (!bodyEl) return;
+
+  const rawText = email.bodyText || email.bodyPreview || '';
+  const rawHtml = email.bodyHtml || '';
+  const clean = buildCleanEmailBody(email);
+  const useRawView = mode === 'raw';
+  const rawContent = rawText || stripHtmlForDisplay(rawHtml) || '(无内容)';
+  const bodyContent = email.protocol === 'qq-mail'
+    ? renderCleanEmailContent(clean)
+    : renderOriginalEmailContent(email);
+
+  bodyEl.innerHTML = `
+    <div class="email-detail-toolbar">
+      <div class="email-detail-tabs">
+        <button class="email-detail-tab ${!useRawView ? 'active' : ''}" data-mode="body">正文</button>
+        <button class="email-detail-tab ${useRawView ? 'active' : ''}" data-mode="raw">原文</button>
+      </div>
+      ${clean.code ? `<button class="email-code-copy" data-code="${escapeAttr(clean.code)}" title="复制验证码">复制验证码</button>` : ''}
+    </div>
+    <div class="email-detail-content">
+      ${useRawView ? renderRawEmailContent(rawContent) : bodyContent}
+    </div>
+  `;
+
+  bodyEl.querySelectorAll('.email-detail-tab').forEach(btn => {
+    btn.addEventListener('click', () => renderEmailDetailBody(email, btn.dataset.mode));
+  });
+  bodyEl.querySelector('.email-code-copy')?.addEventListener('click', () => {
+    copyText(clean.code, `已复制验证码 ${clean.code}`);
+  });
+}
+
+function renderCleanEmailContent(clean) {
+  if (!clean.text && !clean.code) {
+    return '<div class="email-clean empty">(无内容)</div>';
+  }
+
+  return `<article class="email-clean">
+    ${clean.code ? `<section class="email-code-panel">
+      <span class="email-code-label">验证码</span>
+      <strong class="email-code-value">${escapeHtml(clean.code)}</strong>
+    </section>` : ''}
+    <div class="email-clean-text">${formatCleanEmailText(clean.text || '')}</div>
+  </article>`;
+}
+
+function renderRawEmailContent(rawContent) {
+  return `<pre class="email-raw">${escapeHtml(rawContent || '(无内容)')}</pre>`;
+}
+
+function renderOriginalEmailContent(email) {
+  if (email.bodyHtml) {
+    return `<iframe class="email-html-frame" srcdoc="${escapeAttr(email.bodyHtml)}" sandbox="allow-same-origin"></iframe>`;
+  }
+  return renderCleanEmailContent(buildCleanEmailBody(email));
+}
+
+function buildCleanEmailBody(email) {
+  const source = [
+    email.bodyText,
+    stripHtmlForDisplay(email.bodyHtml || ''),
+    email.bodyPreview,
+  ].filter(Boolean).join('\n');
+  const decoded = decodeDisplayText(source);
+  let text = stripHtmlForDisplay(decoded)
+    .replace(/DuckDuckGo\s+removed\s+trackers\s+from\s+[^.]+\.?\s*More\s*Deactivate/gi, ' ')
+    .replace(/\bDuckDuckGo\s+removed\s+trackers\s+from\s+[^.]+\.?\s*More\b/gi, ' ')
+    .replace(/\bDeactivate\b/gi, ' ')
+    .replace(/\bChatGPT\s+Help\s+center\b/gi, ' ')
+    .replace(/\bHelp\s+center\b/gi, ' ')
+    .replace(/\bChatGPT\s+ChatGPT\b/gi, 'ChatGPT')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const code = extractDisplayOtp(text);
+  if (code) {
+    const marker = text.search(/enter\s+this\s+temporary\s+verification\s+code\s+to\s+continue/i);
+    if (marker >= 0) text = text.slice(marker);
+  }
+
+  return { text, code };
+}
+
+function decodeDisplayText(value = '') {
+  return String(value || '')
+    .replace(/=\r?\n/g, '')
+    .replace(/=([0-9A-F]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+}
+
+function stripHtmlForDisplay(value = '') {
+  return String(value || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ');
+}
+
+function extractDisplayOtp(text = '') {
+  const patterns = [
+    /enter\s+this\s+temporary\s+verification\s+code\s+to\s+continue(?:\D{0,80})(\d{6})/i,
+    /(?:login\s+code|verification\s+code|temporary\s+code|one[-\s]?time\s+code)(?:\D{0,80})(\d{6})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = String(text || '').match(pattern);
+    if (match) return match[1];
+  }
+  return '';
+}
+
+function formatCleanEmailText(text = '') {
+  const normalized = String(text || '')
+    .replace(/(Enter this temporary verification code to continue:?)\s*(\d{6})/i, '$1\n$2')
+    .replace(/(Didn'?t request a verification code\?)/i, '\n$1')
+    .replace(/(Best,\s*The ChatGPT team)/i, '\n$1')
+    .trim();
+
+  return escapeHtml(normalized).replace(/\n/g, '<br>');
 }
 
 // ==================== 辅助函数 ====================
